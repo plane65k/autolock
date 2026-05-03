@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Device Control</title>
+    <!-- Load Supabase Library First -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background: #121212; color: white; padding: 20px; }
+        .card { background: #1e1e1e; padding: 30px; border-radius: 15px; max-width: 400px; margin: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .hidden { display: none !important; }
+        button { background: #3f51b5; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 10px; transition: 0.3s; }
+        button:hover { background: #5c6bc0; }
+        input { padding: 12px; border-radius: 5px; border: 1px solid #333; background: #2b2b2b; color: white; width: 80%; margin-bottom: 10px; }
+        
+        /* Lock Screen Styling */
+        #lock-overlay {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: black; color: white; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 10000;
+        }
+        .lock-text { font-size: 5rem; font-weight: bold; color: #ff1744; margin: 0; }
+    </style>
+</head>
+<body>
+
+    <div id="setup-screen" class="card">
+        <h1>Device Setup</h1>
+        <p>Select the role for this device:</p>
+        <button onclick="window.initMode('laptop')">Laptop (Receiver)</button>
+        <button onclick="window.initMode('phone')">Phone (Trigger)</button>
+    </div>
+
+    <!-- LAPTOP VIEW -->
+    <div id="laptop-view" class="card hidden">
+        <h2>Laptop Mode</h2>
+        <p>Status: <span id="lp-status" style="color: #4caf50;">Listening...</span></p>
+        <p>Ensure you click the screen once to allow Fullscreen auto-trigger.</p>
+    </div>
+
+    <!-- LOCK OVERLAY -->
+    <div id="lock-overlay" class="hidden">
+        <p class="lock-text">LOCKED</p>
+        <p>Unauthorized access restricted.</p>
+        <button onclick="attemptExit()">Dismiss (Requires Unlock from Phone)</button>
+    </div>
+
+    <!-- PHONE VIEW -->
+    <div id="phone-view" class="card hidden">
+        <h2>Trigger Control</h2>
+        <div id="pairing-section">
+            <input type="text" id="target-id" placeholder="Device ID (e.g. laptop_1)" value="laptop_1">
+            <button onclick="window.pairFromPhone()">Connect to Device</button>
+        </div>
+        <div id="control-section" class="hidden">
+            <p>Target: <strong id="display-target">---</strong></p>
+            <p>Unlock Code: <h2 id="display-code" style="color: #ffca28;">----</h2></p>
+            <button id="toggle-lock-btn" onclick="window.toggleRemoteLock()" style="width: 100%; height: 80px; font-weight: bold;">TOGGLE LOCK</button>
+        </div>
+    </div>
+
+    <script>
+        // Use unique variable names to avoid "already declared" errors
+        const SB_URL = 'https://ccajarjvtqtqxvshzysz.supabase.co';
+        const SB_KEY = 'sb_publishable_8Ltq_w1gabVJCAAlfo-skQ_LLA3Ciju';
+        const supabaseClient = supabase.createClient(SB_URL, SB_KEY);
+
+        let deviceId = "";
+        let lockActive = false;
+
+        // Global functions attached to window to ensure HTML can see them
+        window.initMode = function(mode) {
+            document.getElementById('setup-screen').classList.add('hidden');
+            if (mode === 'laptop') {
+                deviceId = "laptop_1"; 
+                document.getElementById('laptop-view').classList.remove('hidden');
+                startLaptopListener();
+            } else {
+                document.getElementById('phone-view').classList.remove('hidden');
+            }
+        };
+
+        // --- LAPTOP LOGIC ---
+        async function startLaptopListener() {
+            // Subscription for real-time updates
+            supabaseClient
+                .channel('status_updates')
+                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'status' }, payload => {
+                    if (payload.new.device_name === deviceId) {
+                        applyLockState(payload.new.is_locked);
+                    }
+                })
+                .subscribe();
+            
+            // Initial Check
+            const { data } = await supabaseClient.from('status').select('is_locked').eq('device_name', deviceId).single();
+            if (data) applyLockState(data.is_locked);
+        }
+
+        function applyLockState(state) {
+            lockActive = state;
+            const overlay = document.getElementById('lock-overlay');
+            if (lockActive) {
+                overlay.classList.remove('hidden');
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen().catch(e => console.log("Fullscreen needs user click first"));
+                }
+            } else {
+                overlay.classList.add('hidden');
+                if (document.fullscreenElement) document.exitFullscreen();
+            }
+        }
+
+        window.attemptExit = function() {
+            if (lockActive) {
+                // Force it back if it tries to close
+                document.documentElement.requestFullscreen();
+                alert("Device is remotely locked.");
+            }
+        };
+
+        // --- PHONE LOGIC ---
+        window.pairFromPhone = async function() {
+            deviceId = document.getElementById('target-id').value;
+            const { data, error } = await supabaseClient.from('status').select('*').eq('device_name', deviceId).single();
+
+            if (data) {
+                document.getElementById('pairing-section').classList.add('hidden');
+                document.getElementById('control-section').classList.remove('hidden');
+                document.getElementById('display-target').innerText = deviceId;
+                updatePhoneDisplay(data);
+            } else {
+                alert("Device ID not found in Supabase table.");
+            }
+        };
+
+        function updatePhoneDisplay(data) {
+            lockActive = data.is_locked;
+            document.getElementById('display-code').innerText = data.unlock_code || "No Code Set";
+            const btn = document.getElementById('toggle-lock-btn');
+            btn.innerText = lockActive ? "UNLOCK LAPTOP" : "LOCK LAPTOP";
+            btn.style.background = lockActive ? "#4caf50" : "#f44336";
+        }
+
+        window.toggleRemoteLock = async function() {
+            const newState = !lockActive;
+            const { data, error } = await supabaseClient
+                .from('status')
+                .update({ is_locked: newState })
+                .eq('device_name', deviceId)
+                .select()
+                .single();
+            
+            if (data) updatePhoneDisplay(data);
+        };
+
+        // Re-enforce fullscreen if laptop user tries to escape
+        document.addEventListener('fullscreenchange', () => {
+            if (!document.fullscreenElement && lockActive) {
+                document.documentElement.requestFullscreen();
+            }
+        });
+    </script>
+</body>
+</html>
